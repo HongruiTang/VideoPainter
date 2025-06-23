@@ -25,7 +25,7 @@ from io import BytesIO
 import base64
 
 
-vlm_model = OpenAI()
+# vlm_model = OpenAI()
 
 def _visualize_video(pipe, mask_background, original_video, video, masks):
     
@@ -116,6 +116,59 @@ def read_video_with_mask(video_path, masks, mask_id, skip_frames_start=0, skip_f
     video = [item.convert("RGB") for item in video]
     return video, masked_video, binary_masks, fps
 
+def read_video_with_mask_from_frame(video_path, mask_path, skip_frames_start=0, skip_frames_end=-1, mask_background=False, fps=0):
+    '''
+    read the video and masks, and return the video, masked video and binary masks
+    Args:
+        video_path: str, the path of the video
+        masks: np.ndarray, the masks of the video
+        skip_frames_start: int, the number of frames to skip at the beginning
+        skip_frames_end: int, the number of frames to skip at the end
+    Returns:
+        video: List[Image.Image], the video (RGB)
+        masked_video: List[Image.Image], the masked video (RGB)
+        binary_masks: List[Image.Image], the binary masks (RGB)
+    '''
+    frame_paths = [
+        os.path.join(video_path, f) for f in os.listdir(video_path)
+        if f.startswith("frame_") and f.endswith(".png")
+    ]
+    mask_paths = [
+        os.path.join(mask_path, f) for f in os.listdir(mask_path)
+        if f.startswith("seg_mask_") and f.endswith(".png")
+    ]
+
+    def sort_key(path):
+        return int(os.path.splitext(os.path.basename(path))[0].split('_')[-1])
+
+    frame_paths = sorted(frame_paths, key=sort_key)
+    mask_paths = sorted(mask_paths, key=sort_key)
+
+    video = [Image.open(p).convert("RGB") for p in frame_paths]
+    masks = [Image.open(p).convert("L") for p in mask_paths]
+
+    masked_video = []
+    binary_masks = []
+    for frame, frame_mask in zip(video, masks):
+        frame_array = np.array(frame) 
+        mask = np.array(frame_mask) 
+
+        black_frame = np.zeros_like(frame_array)  
+        binary_mask = (mask == 255)
+
+        binary_mask_expanded = np.repeat(binary_mask[:, :, np.newaxis], 3, axis=2)
+        
+        masked_frame = np.where(binary_mask_expanded, black_frame, frame_array)
+        masked_video.append(Image.fromarray(masked_frame.astype(np.uint8)).convert("RGB"))
+        
+        if mask_background:
+            binary_mask_image = np.where(binary_mask, 0, 255).astype(np.uint8)
+        else:
+            binary_mask_image = np.where(binary_mask, 255, 0).astype(np.uint8)
+        binary_masks.append(Image.fromarray(binary_mask_image).convert("RGB"))
+    video = [item.convert("RGB") for item in video]
+    return video, masked_video, binary_masks, fps
+
 def video_editing_prompt(prompt, llm_model, masked_image=None, target_img_caption=True):
     '''
     Generate image inpainting prompt based on masked image or video description
@@ -128,6 +181,7 @@ def video_editing_prompt(prompt, llm_model, masked_image=None, target_img_captio
         prompt: original video description
         image_inpainting_prompt: static description for inpainting
     '''
+
     if prompt is None:
         raise ValueError("prompt is None")
         
@@ -267,20 +321,23 @@ def generate_video(
             mask_frames_path = os.path.join("../data/video_inpainting/pexels", video_base_name, "all_masks.npz")
         else:
             raise NotImplementedError
-        fps = meta_data['fps']
+        video_path = "../../data/droid_2/images/"
+        mask_frames_path = "../../data/droid_2/masks/"
+        fps = 8
         mask_id = meta_data['mask_id']
-        start_frame = meta_data['start_frame']
-        end_frame = meta_data['end_frame']
-        all_masks = np.load(mask_frames_path)["arr_0"]
+        start_frame = 0
+        end_frame = -1
+        # all_masks = np.load(mask_frames_path)["arr_0"]
         prompt = meta_data['caption']
         
         
         print("-"*100)
-        print(f"video_path: {video_path}; mask_id: {mask_id}; start_frame: {start_frame}; end_frame: {end_frame}; mask_shape: {all_masks.shape}")
+        print(f"video_path: {video_path}; mask_id: {mask_id}; start_frame: {start_frame}; end_frame: {end_frame}")
         print("-"*100)
         
-        video, masked_video, binary_masks, fps = read_video_with_mask(video_path, skip_frames_start=start_frame, skip_frames_end=end_frame, masks=all_masks, mask_id=mask_id, mask_background=mask_background, fps=fps)
-
+        video, masked_video, binary_masks, fps = read_video_with_mask_from_frame(video_path, mask_frames_path, skip_frames_start=start_frame, skip_frames_end=end_frame, mask_background=mask_background, fps=fps)
+        
+        #-----------------------------#
         if inpainting_branch:
             print(f"Using the provided inpainting branch: {inpainting_branch}")
             branch = CogvideoXBranchModel.from_pretrained(inpainting_branch, torch_dtype=dtype).to(dtype=dtype).cuda()
@@ -364,7 +421,8 @@ def generate_video(
             masked_image = Image.fromarray(masked_image.astype(np.uint8))
 
 
-            prompt, image_inpainting_prompt = video_editing_prompt(prompt, llm_model, masked_image=masked_image)
+            # prompt, image_inpainting_prompt = video_editing_prompt(prompt, llm_model, masked_image=masked_image)
+            image_inpainting_prompt = "Realistic red Coca-Cola aluminum can, classic white script logo, glossy finish, upright, photorealistic" # "Ocean waves near the coastline."
             print("-"*100)
             print(f"prompt: {prompt}")
             print("-"*100)
@@ -410,9 +468,10 @@ def generate_video(
     pipe.scheduler = CogVideoXDPMScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
     pipe.to("cuda")
 
-    if long_video:
-        pipe.vae.enable_slicing()
-        pipe.vae.enable_tiling()
+    # if long_video:
+    # pipe.enable_sequential_cpu_offload()
+    pipe.vae.enable_slicing()
+    pipe.vae.enable_tiling()
 
 
     if generate_type == "i2v_inpainting":
